@@ -14,7 +14,7 @@ opt = lapp[[
       --dataRoot        (default ./dataset/attribute/attribute_data/)        Data root folder
       --imageRoot       (default ./dataset/attribute/apascal_images/)       Image dir
       --loadFrom        (default "")      Model to load
-      --experimentName  (default "snapshots/aPascalTest/")
+      --experimentName  (default "snapshots/aPascal_weight_balance/")
 ]]
 
 torch.setdefaulttensortype('torch.FloatTensor')
@@ -37,6 +37,13 @@ dataset = Dataset('dataset/attribute/attribute_data/',
                    ,opt.batchSize )
 train_size, val_size = dataset:size()
 
+balance_weights = {}
+local txt = io.open('dataset/attribute/attribute_data/balancing_weights.txt')
+for line in txt:lines() do
+    line = line:split('\t')
+    balance_weights[#balance_weights+1] = {pl = tonumber(line[1]), nl = tonumber(line[2])}
+end
+txt:close()
 
 local model, sgdState
 if( opt.loadFrom ~= "" ) then
@@ -128,8 +135,10 @@ end
 --------------------------------------------------------Loss
 loss = nn.ParallelCriterion()
 for i = 1,64 do
-    local bce = nn.BCECriterion():cuda()
-    loss:add( bce )
+    local pl = balance_weights[i].pl
+    local nl = balance_weights[i].nl
+    local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( nl/pl ):float() ):cuda()
+    loss:add( bce, pl/(pl+nl) )
 end
 loss:cuda()
 -- graph.dot(model.fg, 'mymodel', 'mymodel')
@@ -233,7 +242,7 @@ function afterEpoch(i)
 
     print 'evaluate....'
     ret = {eval_all()}
-    logger:eval( {state = {nSampledImage = sgdState.nSampledImages, nEvalCounter = sgdState.nEvalCounter, epochCounter = sgdState.epochCounter }, eval = ret } )
+    logger:eval( {state = {nSampledImage = sgdState.nSampledImages, nEvalCounter = sgdState.nEvalCounter, epochCounter = sgdState.epochCounter }, eval = {total = ret[1], tp = torch.totable(ret[2]), tn = torch.totable(ret[3]), fp = torch.totable(ret[4]), fn = torch.totable(ret[5])} } )
 
     print 'resume training....'
 end
@@ -275,15 +284,16 @@ function train( fb, weights, sgdState, epochSize, maxEpoch, afterEpoch )
    end
 end
 
--- train( forwardBackward, weights, sgdState, train_size, 100, afterEpoch )
-total,true_positive,true_negative,false_positive,false_negative = eval_all()
-for i = 1,64 do
-    local accuracy = (true_positive[i] + true_negative[i]) / total
-    local precision = true_positive[i] / (true_positive[i] + false_positive[i])
-    local recall = true_positive[i] / (true_positive[i] + false_negative[i])
-    local f1 = 2 * precision * recall / (precision + recall)
-    print (string.format("%4d/%4d/%4d/%4d/%4d/%0.2f/%0.2f/%0.2f/%0.2f",total, true_positive[i], true_negative[i], false_positive[i], false_negative[i], accuracy, precision, recall, f1))
-end
+train( forwardBackward, weights, sgdState, train_size, 100, afterEpoch )
+
+--total,true_positive,true_negative,false_positive,false_negative = eval_all()
+--for i = 1,64 do
+--    local accuracy = (true_positive[i] + true_negative[i]) / total
+--    local precision = true_positive[i] / (true_positive[i] + false_positive[i])
+--    local recall = true_positive[i] / (true_positive[i] + false_negative[i])
+--    local f1 = 2 * precision * recall / (precision + recall)
+--    print (string.format("%4d/%4d/%4d/%4d/%4d/%0.2f/%0.2f/%0.2f/%0.2f",total, true_positive[i], true_negative[i], false_positive[i], false_negative[i], accuracy, precision, recall, f1))
+--end
 
 logger:close()
 
