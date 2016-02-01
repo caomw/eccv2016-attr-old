@@ -2,3 +2,7 @@ snapshots
 mnist.hdf5
 *.swp
 cache
+.ipynb*
+dataset
+mymodel.dot
+mymodel.svg
