@@ -9,13 +9,13 @@ require 'optim'
 require 'logger'
 
 opt = lapp[[
-      --device          (default 2)        Gpu Device to use
+      --device          (default 1)        Gpu Device to use
       --batchSize       (default 128)      Sub-batch size
       --dataRoot        (default ./dataset/attribute/attribute_data/)        Data root folder
       --imageRoot       (default ./dataset/attribute/apascal_images/)       Image dir
       --baseModel       (default snapshots/aPascal_weight_balance/model100.th)  Base model
       --loadFrom        (default "")      Model to load
-      --experimentName  (default "snapshots/aPascal_weight_balance_v2/")
+      --experimentName  (default "snapshots/aPascal_weight_balance_root_v2/")
 ]]
 
 torch.setdefaulttensortype('torch.FloatTensor')
@@ -49,11 +49,13 @@ txt:close()
 attr_levels = {}
 local txt = io.open('attribute_learning_level_v2.txt')
 for line in txt:lines() do
-    attr_levels[#attr_levels] = tonumber(line)
+    attr_levels[#attr_levels+1] = tonumber(line)
 end
 txt:close()
 
-local model, sgdState
+levelNum = math.max(unpack(attr_levels))
+
+--local model, sgdState
 if( opt.loadFrom ~= "" ) then
     logger:info("Reloading Model...")
     model  = torch.load( opt.experimentName..'model'..opt.loadFrom..'.th' )
@@ -192,31 +194,20 @@ end
 --------------------------------------------------------Loss
 loss = nn.ParallelCriterion()
 
-loss_l1 = nn.ParallelCriterion()
-for i = 1,64 do
-    local pl = balance_weights[i].pl
-    local nl = balance_weights[i].nl
-    local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( nl/pl ):float() ):cuda()
-    if attr_levels[i] == 1 then
-        loss_l1:add( bce, pl/(pl+nl) )
-    else
-        loss_l1:add( bce, 0 )
+for level = 1,levelNum do
+    loss_level = nn.ParallelCriterion()
+    for i = 1,64 do
+        local pl = balance_weights[i].pl
+        local nl = balance_weights[i].nl
+        local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( math.sqrt(nl)/math.sqrt(pl) ):float() ):cuda()
+        if attr_levels[i] == level then
+            loss_level:add( bce, math.sqrt(pl)/(math.sqrt(pl)+math.sqrt(nl)) )
+        else
+            loss_level:add( bce, 0 )
+        end
     end
+    loss:add(loss_level)
 end
-loss_l2 = nn.ParallelCriterion()
-for i = 1,64 do
-    local pl = balance_weights[i].pl
-    local nl = balance_weights[i].nl
-    local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( nl/pl ):float() ):cuda()
-    if attr_levels[i] == 2 then
-        loss_l2:add( bce, pl/(pl+nl) )
-    else
-        loss_l2:add( bce, 0 )
-    end
-end
-
-loss:add(loss_l1)
-loss:add(loss_l2)
 --
 loss:cuda()
 graph.dot(model.fg, 'mymodel', 'mymodel')
@@ -236,12 +227,17 @@ function forwardBackward()
 
     collectgarbage(); collectgarbage();
     local y = model:forward(ims)
-    local loss_val = loss:forward(y, {labels,labels})
-    local df_dw = loss:backward(y, {labels,labels})
+
+    local copy_labels = {}
+    for i = 1,levelNum do
+        copy_labels[#copy_labels+1] = labels
+    end
+    local loss_val = loss:forward(y, copy_labels)
+    local df_dw = loss:backward(y, copy_labels)
     model:backward(ims, df_dw)
 
     local loss_per_attribute = {}
-    for level = 1,2 do
+    for level = 1,levelNum do
         loss_per_attribute[level] = {}
         for i = 1,64 do
             loss_per_attribute[level][i] = loss.criterions[level].criterions[i].output
@@ -253,26 +249,37 @@ end
 
 
 function eval( ims, labels )
-    local true_positive = torch.Tensor(64):zero()
-    local true_negative = torch.Tensor(64):zero()
-    local false_positive = torch.Tensor(64):zero()
-    local false_negative = torch.Tensor(64):zero()
+    local true_positive = torch.Tensor(1+levelNum,64):zero()
+    local true_negative = torch.Tensor(1+levelNum,64):zero()
+    local false_positive = torch.Tensor(1+levelNum,64):zero()
+    local false_negative = torch.Tensor(1+levelNum,64):zero()
     collectgarbage(); collectgarbage();
-    --TODO
-    --local y = model:forward( ims:cuda() )
-    --for label_i = 1,64 do
-    --    local prediction = torch.gt(y[label_i]:float(), torch.Tensor(y[label_i]:size()):fill(0.5)):float()
-    --    local correct = torch.eq( prediction, labels[label_i] ):float()
-    --    local not_correct = torch.ne( prediction, labels[label_i] ):float()
 
-    --    local tp = torch.eq( correct + labels[label_i], torch.Tensor(correct:size()):fill(2.0) ):sum() -- tensor doesn't have and operation :(
-    --    local fp = torch.eq( not_correct + prediction, torch.Tensor(not_correct:size()):fill(2.0) ):sum()
+    local y_all = model:forward( ims:cuda() )
+    for level = 1,levelNum do
+        local y = y_all[level]
+        for label_i = 1,64 do
+            local prediction = torch.gt(y[label_i]:float(), torch.Tensor(y[label_i]:size()):fill(0.5)):float()
+            local correct = torch.eq( prediction, labels[label_i] ):float()
+            local not_correct = torch.ne( prediction, labels[label_i] ):float()
 
-    --    true_positive[label_i] = true_positive[label_i] + tp
-    --    true_negative[label_i] = true_negative[label_i] + correct:sum() - tp
-    --    false_positive[label_i] = false_positive[label_i] + fp
-    --    false_negative[label_i] = false_negative[label_i] + not_correct:sum() - fp
-    --end
+            local tp = torch.eq( correct + labels[label_i], torch.Tensor(correct:size()):fill(2.0) ):sum() -- tensor doesn't have and operation :(
+            local fp = torch.eq( not_correct + prediction, torch.Tensor(not_correct:size()):fill(2.0) ):sum()
+
+            true_positive[level][label_i] = true_positive[level][label_i] + tp
+            true_negative[level][label_i] = true_negative[level][label_i] + correct:sum() - tp
+            false_positive[level][label_i] = false_positive[level][label_i] + fp
+            false_negative[level][label_i] = false_negative[level][label_i] + not_correct:sum() - fp
+        end
+    end
+
+    for label_i = 1,64 do
+        local level = attr_levels[label_i]
+        true_positive[levelNum+1][label_i] = true_positive[level][label_i]
+        true_negative[levelNum+1][label_i] = true_negative[level][label_i]
+        false_positive[levelNum+1][label_i] = false_positive[level][label_i]
+        false_negative[levelNum+1][label_i] = false_negative[level][label_i]
+    end
 
     return ims:size(1), true_positive, true_negative, false_positive, false_negative
 end
@@ -290,12 +297,12 @@ function eval_all() --Evaluate
 
     local total = 0
 
-    local correct = torch.Tensor(64):zero()
+    local correct = torch.Tensor(1+levelNum,64):zero()
 
-    local true_positive = torch.Tensor(64):zero()
-    local true_negative = torch.Tensor(64):zero()
-    local false_positive = torch.Tensor(64):zero()
-    local false_negative = torch.Tensor(64):zero()
+    local true_positive = torch.Tensor(1+levelNum,64):zero()
+    local true_negative = torch.Tensor(1+levelNum,64):zero()
+    local false_positive = torch.Tensor(1+levelNum,64):zero()
+    local false_negative = torch.Tensor(1+levelNum,64):zero()
 
     while true do
         flag,ims,labels = coroutine.resume(co, dataset)
@@ -311,7 +318,6 @@ function eval_all() --Evaluate
         false_negative = false_negative + ret[5]
 
         xlua.progress(total,val_size)
-        break
     end
 
     return total,true_positive,true_negative,false_positive,false_negative
@@ -345,6 +351,7 @@ function train( fb, weights, sgdState, epochSize, maxEpoch, afterEpoch )
       collectgarbage(); collectgarbage()
       -- Run forward and backward pass on inputs and labels
       local loss_val, loss_per_attribute, gradients, batchProcessed = fb()
+      -- print (loss_val)
       logger:train( {state = {nSampledImage = sgdState.nSampledImages, nEvalCounter = sgdState.nEvalCounter, epochCounter = sgdState.epochCounter }, total_loss = loss_val, loss_per_attributes = loss_per_attribute } )
       -- SGD step: modifies weights in-place
       optimizer(function() return loss_val, gradients end,
@@ -369,18 +376,18 @@ function train( fb, weights, sgdState, epochSize, maxEpoch, afterEpoch )
    end
 end
 
--- train( forwardBackward, weights, sgdState, train_size, 100, afterEpoch )
+train( forwardBackward, weights, sgdState, train_size, 100, afterEpoch )
 
 --total,true_positive,true_negative,false_positive,false_negative = eval_all()
 --for i = 1,64 do
---    local accuracy = (true_positive[i] + true_negative[i]) / total
---    local precision = true_positive[i] / (true_positive[i] + false_positive[i])
---    local recall = true_positive[i] / (true_positive[i] + false_negative[i])
+--    local accuracy = (true_positive[levelNum+1][i] + true_negative[levelNum+1][i]) / total
+--    local precision = true_positive[levelNum+1][i] / (true_positive[levelNum+1][i] + false_positive[levelNum+1][i])
+--    local recall = true_positive[levelNum+1][i] / (true_positive[levelNum+1][i] + false_negative[levelNum+1][i])
 --    local f1 = 2 * precision * recall / (precision + recall)
---    print (string.format("%4d/%4d/%4d/%4d/%4d/%0.2f/%0.2f/%0.2f/%0.2f",total, true_positive[i], true_negative[i], false_positive[i], false_negative[i], accuracy, precision, recall, f1))
+--    print (string.format("%4d/%4d/%4d/%4d/%4d/%0.2f/%0.2f/%0.2f/%0.2f",total, true_positive[levelNum+1][i], true_negative[levelNum+1][i], false_positive[levelNum+1][i], false_negative[levelNum+1][i], accuracy, precision, recall, f1))
 --end
 
--- logger:close()
+logger:close()
 
 --[[ TODO :
 --base model weight loading
