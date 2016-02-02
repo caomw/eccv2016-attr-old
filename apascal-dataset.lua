@@ -38,17 +38,18 @@ function Dataset:get_image_attribute(data,index)
     end
 
     instance = data[index]
-    if( instance.resized == nil ) then
+    if( instance.preprocessed == nil ) then
+    --if( instance.resized == nil ) then
         local im = image.load(instance.fileloc)
         local cropped_image = image.crop(im, instance.crop.lu.x, instance.crop.lu.y, instance.crop.rl.x, instance.crop.rl.y )
         local resized = image.scale(cropped_image,224)
         local preprocessed = resized:add(-self.mean:resize(3,1,1):expandAs(resized):mul(1/self.std))
-        instance.resized = torch.Tensor(3,224,224):zero()
+        --instance.resized = torch.Tensor(3,224,224):zero()
         instance.preprocessed = torch.Tensor(3,224,224):zero()
 
         top_margin = ( 224 - resized:size(2) ) / 2 + 1
         left_margin = ( 224 - resized:size(3) ) / 2 + 1
-        instance.resized:sub(1, 3, top_margin, top_margin+resized:size(2)-1 , left_margin, left_margin+resized:size(3)-1):copy(resized)
+        -- instance.resized:sub(1, 3, top_margin, top_margin+resized:size(2)-1 , left_margin, left_margin+resized:size(3)-1):copy(resized)
         instance.preprocessed:sub(1, 3, top_margin, top_margin+resized:size(2)-1 , left_margin, left_margin+resized:size(3)-1):copy(preprocessed)
     end
     return instance.preprocessed, instance.attribute
