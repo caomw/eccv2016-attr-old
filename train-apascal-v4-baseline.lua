@@ -15,7 +15,7 @@ opt = lapp[[
       --imageRoot       (default ./dataset/attribute/apascal_images/)       Image dir
       --baseModel       (default .)  Base model
       --loadFrom        (default "")      Model to load
-      --experimentName  (default "snapshots/aPascal_weight_balance_root_v4/")
+      --experimentName  (default "snapshots/aPascal_weight_balance_root_v4_bl/")
 ]]
 
 torch.setdefaulttensortype('torch.FloatTensor')
@@ -46,15 +46,6 @@ for line in txt:lines() do
 end
 txt:close()
 
-attr_levels = {}
-local txt = io.open('attribute_learning_level_v4.txt')
-for line in txt:lines() do
-    attr_levels[#attr_levels+1] = tonumber(line)
-end
-txt:close()
-
-levelNum = math.max(unpack(attr_levels))
-
 local model, sgdState
 if( opt.loadFrom ~= "" ) then
     logger:info("Reloading Model...")
@@ -78,17 +69,6 @@ else
     model = addResidualLayer2(model, 64)
     ------> 64, 56,56
 
-    -- Level 1 features --
-    l1 = cudnn.SpatialAveragePooling(56, 56, 1,1, 0,0)(model)
-    ------> 64, 1, 1
-    l1 = nn.Reshape(64)(l1)
-    ------> 64
-    l1 = nn.Linear(64,64)(l1)
-    ------> 64
-    l1 = nn.BatchNormalization(64)(l1)
-    l1 = nn.Sigmoid()(l1)
-    l1 = nn.SplitTable(2,64)(l1)
-
     ------> 64, 56,56
     model = addResidualLayer2(model, 64, 128, 2)
     model = addResidualLayer2(model, 128)
@@ -96,35 +76,12 @@ else
     model = addResidualLayer2(model, 128)
     ------> 128, 28,28
 
-    -- Level 2 features --
-    l2 = cudnn.SpatialAveragePooling(28, 28, 1,1, 0,0)(model)
-    ------> 128, 1, 1
-    l2 = nn.Reshape(128)(l2)
-    ------> 128
-    l2 = nn.Linear(128,64)(l2)
-    ------> 64
-    l2 = nn.BatchNormalization(64)(l2)
-    l2 = nn.Sigmoid()(l2)
-    l2 = nn.SplitTable(2,64)(l2)
-
     ------> 128, 28,28
     model = addResidualLayer2(model, 128, 256, 2)
     model = addResidualLayer2(model, 256)
     model = addResidualLayer2(model, 256)
     model = addResidualLayer2(model, 256)
     ------> 256, 14,14
-
-    -- Level 3 features --
-    ------> 256, 14, 14
-    l3 = cudnn.SpatialAveragePooling(14, 14, 1,1, 0,0)(model)
-    ------> 256, 1, 1
-    l3 = nn.Reshape(256)(l3)
-    ------> 256
-    l3 = nn.Linear(256,64)(l3)
-    ------> 64
-    l3 = nn.BatchNormalization(64)(l3)
-    l3 = nn.Sigmoid()(l3)
-    l3 = nn.SplitTable(2,64)(l3)
 
     ------> 256, 14,14
     model = addResidualLayer2(model, 256, 512, 2)
@@ -146,7 +103,7 @@ else
     --------------------------------------------------------Building Model End
     --------------------------------------------------------Parameter initialize
     --l1_model = nn.gModule({input}, {model})
-    model = nn.gModule({input}, {l1,l2,l3,l4})
+    model = nn.gModule({input}, {l4})
 
     model:cuda()
     model:apply(function(m)
@@ -227,20 +184,11 @@ else
 end
 --------------------------------------------------------Loss
 loss = nn.ParallelCriterion()
-
-for level = 1,levelNum do
-    loss_level = nn.ParallelCriterion()
-    for i = 1,64 do
-        local pl = balance_weights[i].pl
-        local nl = balance_weights[i].nl
-        local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( math.sqrt(nl)/math.sqrt(pl) ):float() ):cuda()
-        if attr_levels[i] == level then
-            loss_level:add( bce, math.sqrt(pl)/(math.sqrt(pl)+math.sqrt(nl)) )
-        else
-            loss_level:add( bce, 0 )
-        end
-    end
-    loss:add(loss_level)
+for i = 1,64 do
+    local pl = balance_weights[i].pl
+    local nl = balance_weights[i].nl
+    local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( math.sqrt(nl)/math.sqrt(pl) ):float() ):cuda()
+    loss:add( bce, math.sqrt(pl)/(math.sqrt(pl)+math.sqrt(nl)) )
 end
 --
 loss:cuda()
@@ -263,58 +211,37 @@ function forwardBackward()
 
     collectgarbage(); collectgarbage();
     local y = model:forward(ims)
-
-    local copy_labels = {}
-    for i = 1,levelNum do
-        copy_labels[#copy_labels+1] = labels
-    end
-    local loss_val = loss:forward(y, copy_labels)
-    local df_dw = loss:backward(y, copy_labels)
+    local loss_val = loss:forward(y, labels)
+    local df_dw = loss:backward(y, labels)
     model:backward(ims, df_dw)
 
     local loss_per_attribute = {}
-    for level = 1,levelNum do
-        loss_per_attribute[level] = {}
-        for i = 1,64 do
-            loss_per_attribute[level][i] = loss.criterions[level].criterions[i].output
-        end
+    for i = 1,64 do
+        loss_per_attribute[i] = loss.criterions[i].output
     end
 
     return loss_val, loss_per_attribute, gradients, ims:size(1)
 end
 
-
 function eval( ims, labels )
-    local true_positive = torch.Tensor(1+levelNum,64):zero()
-    local true_negative = torch.Tensor(1+levelNum,64):zero()
-    local false_positive = torch.Tensor(1+levelNum,64):zero()
-    local false_negative = torch.Tensor(1+levelNum,64):zero()
+    local true_positive = torch.Tensor(64):zero()
+    local true_negative = torch.Tensor(64):zero()
+    local false_positive = torch.Tensor(64):zero()
+    local false_negative = torch.Tensor(64):zero()
     collectgarbage(); collectgarbage();
-
-    local y_all = model:forward( ims:cuda() )
-    for level = 1,levelNum do
-        local y = y_all[level]
-        for label_i = 1,64 do
-            local prediction = torch.gt(y[label_i]:float(), torch.Tensor(y[label_i]:size()):fill(0.5)):float()
-            local correct = torch.eq( prediction, labels[label_i] ):float()
-            local not_correct = torch.ne( prediction, labels[label_i] ):float()
-
-            local tp = torch.eq( correct + labels[label_i], torch.Tensor(correct:size()):fill(2.0) ):sum() -- tensor doesn't have and operation :(
-            local fp = torch.eq( not_correct + prediction, torch.Tensor(not_correct:size()):fill(2.0) ):sum()
-
-            true_positive[level][label_i] = true_positive[level][label_i] + tp
-            true_negative[level][label_i] = true_negative[level][label_i] + correct:sum() - tp
-            false_positive[level][label_i] = false_positive[level][label_i] + fp
-            false_negative[level][label_i] = false_negative[level][label_i] + not_correct:sum() - fp
-        end
-    end
-
+    local y = model:forward( ims:cuda() )
     for label_i = 1,64 do
-        local level = attr_levels[label_i]
-        true_positive[levelNum+1][label_i] = true_positive[level][label_i]
-        true_negative[levelNum+1][label_i] = true_negative[level][label_i]
-        false_positive[levelNum+1][label_i] = false_positive[level][label_i]
-        false_negative[levelNum+1][label_i] = false_negative[level][label_i]
+        local prediction = torch.gt(y[label_i]:float(), torch.Tensor(y[label_i]:size()):fill(0.5)):float()
+        local correct = torch.eq( prediction, labels[label_i] ):float()
+        local not_correct = torch.ne( prediction, labels[label_i] ):float()
+
+        local tp = torch.eq( correct + labels[label_i], torch.Tensor(correct:size()):fill(2.0) ):sum() -- tensor doesn't have and operation :(
+        local fp = torch.eq( not_correct + prediction, torch.Tensor(not_correct:size()):fill(2.0) ):sum()
+
+        true_positive[label_i] = true_positive[label_i] + tp
+        true_negative[label_i] = true_negative[label_i] + correct:sum() - tp
+        false_positive[label_i] = false_positive[label_i] + fp
+        false_negative[label_i] = false_negative[label_i] + not_correct:sum() - fp
     end
 
     return ims:size(1), true_positive, true_negative, false_positive, false_negative
@@ -333,12 +260,12 @@ function eval_all() --Evaluate
 
     local total = 0
 
-    local correct = torch.Tensor(1+levelNum,64):zero()
+    local correct = torch.Tensor(64):zero()
 
-    local true_positive = torch.Tensor(1+levelNum,64):zero()
-    local true_negative = torch.Tensor(1+levelNum,64):zero()
-    local false_positive = torch.Tensor(1+levelNum,64):zero()
-    local false_negative = torch.Tensor(1+levelNum,64):zero()
+    local true_positive = torch.Tensor(64):zero()
+    local true_negative = torch.Tensor(64):zero()
+    local false_positive = torch.Tensor(64):zero()
+    local false_negative = torch.Tensor(64):zero()
 
     while true do
         flag,ims,labels = coroutine.resume(co, dataset)
