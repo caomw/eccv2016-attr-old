@@ -43,6 +43,7 @@ function Dataset:get_image_attribute(data,index)
         local im = image.load(instance.fileloc)
         local cropped_image = image.crop(im, instance.crop.lu.x, instance.crop.lu.y, instance.crop.rl.x, instance.crop.rl.y )
         local resized = image.scale(cropped_image,224)
+        -- local resized = image.scale(cropped_image,224,224)
         local preprocessed = resized:add(-self.mean:resize(3,1,1):expandAs(resized):mul(1/self.std))
         --instance.resized = torch.Tensor(3,224,224):zero()
         instance.preprocessed = torch.Tensor(3,224,224):zero()
@@ -80,6 +81,32 @@ function Dataset:get_samples(train_or_val)
         end
     end
     return inputs, labels
+end
+
+function Dataset:get_train_sample_co()
+    local co = coroutine.create( function(this)
+        for i = 1, #this.train_data, this.batch_size do
+            local remain = math.min(this.batch_size, #this.train_data-i)
+
+            local inputs = torch.Tensor(remain, 3, 224, 224):zero()
+            local labels = {}
+            for label_i = 1,64 do
+                labels[label_i] = torch.Tensor(remain):zero()
+            end
+
+            for j = 1,remain do
+                local im, attr = this:get_image_attribute(this.train_data, i+j-1)
+                inputs:select(1,j):copy(im)
+                for label_i = 1,64 do
+                    labels[label_i][j] = attr[label_i]
+                end
+            end
+
+            coroutine.yield( inputs, labels )
+        end
+    end
+    )
+    return co
 end
 
 function Dataset:get_valid_sample_co()

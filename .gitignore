@@ -1,4 +1,5 @@
 snapshots
+caffe_models
 mnist.hdf5
 *.swp
 cache

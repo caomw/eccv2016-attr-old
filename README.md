@@ -1,3 +1,10 @@
+Additional dependencies
+
+torch-svm
+
+
+
+
 Deep Residual Learning for Image Recognition
 ============================================
 
