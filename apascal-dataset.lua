@@ -4,7 +4,7 @@ require 'image'
 
 local Dataset = torch.class('Dataset')
 
-function load_txt(filename,image_dir)
+function load_txt(filename,image_dir,zero_as_minus_one)
     local data = {}
     local txt = io.open(filename)
     for line in txt:lines() do
@@ -18,18 +18,23 @@ function load_txt(filename,image_dir)
         instance.attribute = {}
         for i=7,70 do
             instance.attribute[i-6] = tonumber(line[i])
+            if( zero_as_minus_one and instance.attribute[i-6] == 0) then
+                instance.attribute[i-6] = -1
+            end
         end
         data[#data+1] = instance
     end
     txt:close()
     return data
 end
-function Dataset:__init(path,image_dir,mean,std,batch_size)
-    self.train_data = load_txt(path..'apascal_train.txt',image_dir)
-    self.val_data = load_txt(path..'apascal_test.txt',image_dir)
+function Dataset:__init(path,image_dir,mean,std,batch_size,loss_function)
+    local zero_as_minus_one = loss_function == 'margin'
+    self.train_data = load_txt(path..'apascal_train.txt',image_dir, zero_as_minus_one )
+    self.val_data = load_txt(path..'apascal_test.txt',image_dir, zero_as_minus_one )
     self.mean = mean
     self.std = std
     self.batch_size = batch_size
+    self.loss_function = loss_function
 end
 
 function Dataset:get_image_attribute(data,index)

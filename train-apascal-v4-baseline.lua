@@ -16,6 +16,7 @@ opt = lapp[[
       --baseModel       (default .)  Base model
       --loadFrom        (default "")      Model to load
       --experimentName  (default "snapshots/aPascal_weight_balance_root_v4_bl/")
+      --lossFunction    (default "margin")  Target Loss Function - cross entropy or margin
 ]]
 
 torch.setdefaulttensortype('torch.FloatTensor')
@@ -35,7 +36,8 @@ logger:info( opt )
 dataset = Dataset('dataset/attribute/attribute_data/',
                   'dataset/attribute/apascal_images/',
                    torch.Tensor({0.0,0,0,0,0}),1.0
-                   ,opt.batchSize )
+                   ,opt.batchSize
+                   ,opt.lossFunction)
 train_size, val_size = dataset:size()
 
 balance_weights = {}
@@ -98,7 +100,9 @@ else
     l4 = nn.Linear(512,64)(l4)
     ------> 64
     l4 = nn.BatchNormalization(64)(l4)
-    l4 = nn.Sigmoid()(l4)
+    if( opt.lossFunction ~= 'margin' ) then
+        l4 = nn.Sigmoid()(l4)
+    end
     l4 = nn.SplitTable(2,64)(l4)
     --------------------------------------------------------Building Model End
     --------------------------------------------------------Parameter initialize
@@ -185,10 +189,15 @@ end
 --------------------------------------------------------Loss
 loss = nn.ParallelCriterion()
 for i = 1,64 do
-    local pl = balance_weights[i].pl
-    local nl = balance_weights[i].nl
-    local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( math.sqrt(nl)/math.sqrt(pl) ):float() ):cuda()
-    loss:add( bce, math.sqrt(pl)/(math.sqrt(pl)+math.sqrt(nl)) )
+    if ( opt.lossFunction == 'margin' ) then
+        local mce = nn.MarginCriterion() -- Default margin is 1
+        loss:add( mce )
+    else
+        local pl = balance_weights[i].pl
+        local nl = balance_weights[i].nl
+        local bce = nn.BCECriterion( torch.Tensor(opt.batchSize):fill( math.sqrt(nl)/math.sqrt(pl) ):float() ):cuda()
+        loss:add( bce, math.sqrt(pl)/(math.sqrt(pl)+math.sqrt(nl)) )
+    end
 end
 --
 loss:cuda()
@@ -231,7 +240,12 @@ function eval( ims, labels )
     collectgarbage(); collectgarbage();
     local y = model:forward( ims:cuda() )
     for label_i = 1,64 do
-        local prediction = torch.gt(y[label_i]:float(), torch.Tensor(y[label_i]:size()):fill(0.5)):float()
+        local prediction
+        if( opt.lossFunction == 'margin' ) then
+            prediction = torch.gt(y[label_i]:float(), torch.Tensor(y[label_i]:size()):fill(0.0)):float()
+        else
+            prediction = torch.gt(y[label_i]:float(), torch.Tensor(y[label_i]:size()):fill(0.5)):float()
+        end
         local correct = torch.eq( prediction, labels[label_i] ):float()
         local not_correct = torch.ne( prediction, labels[label_i] ):float()
 
@@ -323,7 +337,7 @@ function train( fb, weights, sgdState, epochSize, maxEpoch, afterEpoch )
       -- Display progress and loss
       sgdState.nSampledImages = sgdState.nSampledImages + batchProcessed
       sgdState.nEvalCounter = sgdState.nEvalCounter + 1
-      xlua.progress(sgdState.nSampledImages%epochSize, epochSize)
+      xlua.progress( math.max(sgdState.nSampledImages - epochSize * sgdState.epochCounter, epochSize) , epochSize)
 
       if math.floor(sgdState.nSampledImages / epochSize) ~= sgdState.epochCounter then
          -- Epoch completed!
